@@ -141,6 +141,9 @@ export function TimeRangePicker({
   const localeCode = locale.startsWith("zh") ? "zh-CN" : "en-US";
   const calendarLocale = locale.startsWith("zh") ? zhCN : enUS;
   const showDebugShortPresets = process.env.NODE_ENV !== "production";
+  const showShortPresetInProduction = (
+    preset: Extract<PresetType, "1m" | "5m" | "15m" | "30m">,
+  ) => preset === "5m" || preset === "30m";
 
   const quickPresets = useMemo<
     Array<{ value: Exclude<PresetType, "custom">; label: string }>
@@ -156,15 +159,23 @@ export function TimeRangePicker({
       { value: "today", label: t("preset.today") },
     ];
 
-    if (!showDebugShortPresets) return stablePresets;
-
-    return [
+    const shortPresets: Array<{
+      value: Extract<PresetType, "1m" | "5m" | "15m" | "30m">;
+      label: string;
+    }> = [
       { value: "1m", label: t("preset.1m") },
       { value: "5m", label: t("preset.5m") },
       { value: "15m", label: t("preset.15m") },
       { value: "30m", label: t("preset.30m") },
-      ...stablePresets,
     ];
+
+    const enabledShortPresets = shortPresets.filter((preset) =>
+      showDebugShortPresets
+        ? true
+        : showShortPresetInProduction(preset.value),
+    );
+
+    return [...enabledShortPresets, ...stablePresets];
   }, [showDebugShortPresets, t]);
 
   const [open, setOpen] = useState(false);
@@ -193,9 +204,7 @@ export function TimeRangePicker({
     const normalizedPreset =
       !showDebugShortPresets &&
       (inferredPreset === "1m" ||
-        inferredPreset === "5m" ||
-        inferredPreset === "15m" ||
-        inferredPreset === "30m")
+        inferredPreset === "15m")
         ? "custom"
         : inferredPreset;
     setSelectedPreset(normalizedPreset);
@@ -451,15 +460,16 @@ export function QuickTimePresets({
 }: {
   onChange: (range: TimeRange) => void;
 }) {
+  const showDebugShortPresets = process.env.NODE_ENV !== "production";
   const presets = [
-    ...(process.env.NODE_ENV !== "production"
-      ? [
-          { label: "1m", range: getPresetTimeRange("1m") },
-          { label: "5m", range: getPresetTimeRange("5m") },
-          { label: "15m", range: getPresetTimeRange("15m") },
-          { label: "30m", range: getPresetTimeRange("30m") },
-        ]
+    ...(showDebugShortPresets
+      ? [{ label: "1m", range: getPresetTimeRange("1m") }]
       : []),
+    { label: "5m", range: getPresetTimeRange("5m") },
+    ...(showDebugShortPresets
+      ? [{ label: "15m", range: getPresetTimeRange("15m") }]
+      : []),
+    { label: "30m", range: getPresetTimeRange("30m") },
     { label: "1h", range: getPresetTimeRange("1h") },
     { label: "24h", range: getPresetTimeRange("24h") },
     { label: "7d", range: getPresetTimeRange("7d") },
