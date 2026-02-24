@@ -232,6 +232,10 @@ export function useDashboard(): UseDashboardReturn {
   const backendStatus: BackendStatus = useMemo(() => {
     if (!activeBackend) return "unknown";
     if (effectiveSummaryError) return "unhealthy";
+    // Prefer the live health-check result when available
+    if (activeBackend.health?.status === "unhealthy") return "unhealthy";
+    if (activeBackend.health?.status === "healthy") return "healthy";
+    // Fallback: infer from listening flag
     if (activeBackend.listening) return "healthy";
     return "unhealthy";
   }, [activeBackend, effectiveSummaryError]);

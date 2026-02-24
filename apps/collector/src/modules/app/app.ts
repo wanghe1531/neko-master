@@ -1274,8 +1274,9 @@ export async function createApp(options: AppOptions) {
     }
   });
 
-  // On server close: flush all pending agent buffers and stop the flush interval.
+  // On server close: stop health checks, flush all pending agent buffers.
   app.addHook('onClose', async () => {
+    backendService.stopHealthChecks();
     clearInterval(agentFlushIntervalId);
     for (const [backendId, buffer] of agentBatchBuffers) {
       try {

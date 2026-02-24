@@ -19,6 +19,31 @@ import type { BackendHealthHistory, BackendHealthPoint } from "@/lib/api";
 
 type HealthStatus = "healthy" | "unhealthy" | "unknown";
 
+// ─── Latency thresholds ──────────────────────────────────────────────────────
+const LATENCY_WARN_MS = 300;  // amber
+const LATENCY_CRIT_MS = 1000; // red
+
+type LatencyTier = "normal" | "warning" | "critical";
+
+function getLatencyTier(ms: number | null): LatencyTier {
+  if (ms === null) return "normal";
+  if (ms >= LATENCY_CRIT_MS) return "critical";
+  if (ms >= LATENCY_WARN_MS) return "warning";
+  return "normal";
+}
+
+const TIER_STROKE: Record<LatencyTier, string> = {
+  normal:   "#10b981",
+  warning:  "#f59e0b",
+  critical: "#ef4444",
+};
+
+const TIER_TEXT: Record<LatencyTier, string> = {
+  normal:   "text-emerald-500",
+  warning:  "text-amber-500",
+  critical: "text-rose-500",
+};
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function toMinuteKey(iso: string): string {
@@ -27,8 +52,6 @@ function toMinuteKey(iso: string): string {
 
 function formatLabel(cursor: Date, spanMs: number): string {
   if (spanMs <= 48 * 3_600_000) {
-    // ≤ 48 h → time only (covers 1 h / 6 h / 12 h / 24 h / 2 d presets)
-    // Matches Overview's minute-granularity axis format exactly
     return cursor.toLocaleTimeString(undefined, {
       hour: "2-digit",
       minute: "2-digit",
@@ -36,7 +59,6 @@ function formatLabel(cursor: Date, spanMs: number): string {
     });
   }
   if (spanMs <= 7 * 86_400_000) {
-    // 2 d – 7 d with hourly buckets → need the date visible too
     return cursor.toLocaleString(undefined, {
       month: "short",
       day: "numeric",
@@ -45,7 +67,6 @@ function formatLabel(cursor: Date, spanMs: number): string {
       hour12: false,
     });
   }
-  // > 7 d → date only, same as Overview day-granularity axis
   return cursor.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -67,7 +88,6 @@ function buildSlots(
   points: BackendHealthPoint[],
   bucketMinutes: number,
 ): Slot[] {
-  // Build minute-key lookup
   const lookup = new Map<string, BackendHealthPoint>();
   for (const p of points) {
     lookup.set(toMinuteKey(p.time), p);
@@ -80,7 +100,6 @@ function buildSlots(
   while (cursor <= to) {
     const bucketStart = cursor.toISOString().slice(0, 16);
 
-    // Collect all raw points that fall within this bucket
     const bucketPoints: BackendHealthPoint[] = [];
     const tmp = new Date(cursor);
     for (let m = 0; m < bucketMinutes; m++) {
@@ -103,12 +122,10 @@ function buildSlots(
         message: null,
       });
     } else {
-      // Worst-case status for the bucket
       const hasUnhealthy = bucketPoints.some((p) => p.status === "unhealthy");
       const hasUnknown   = bucketPoints.some((p) => p.status === "unknown");
       const status: HealthStatus = hasUnhealthy ? "unhealthy" : hasUnknown ? "unknown" : "healthy";
 
-      // Average latency
       const lats = bucketPoints
         .filter((p) => p.latency_ms !== null)
         .map((p) => p.latency_ms as number);
@@ -116,16 +133,13 @@ function buildSlots(
         ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length)
         : null;
 
-      // Last message
       const lastMsg = bucketPoints[bucketPoints.length - 1].message ?? null;
 
       slots.push({
         time: bucketStart,
         timeLabel,
         status,
-        // Latency-line: only draw when healthy; null during outage breaks the area
         latency: status === "healthy" ? avgLatency : null,
-        // Binary online-line: 1 when healthy, null otherwise (for agent-mode backends)
         online:  status === "healthy" ? 1 : null,
         latency_ms: avgLatency,
         message: lastMsg,
@@ -139,16 +153,21 @@ function buildSlots(
 }
 
 /**
- * Only gaps that sit *between* the first and last recorded data point are
- * treated as downtime ("unhealthy").  Leading / trailing gaps — time slots
- * before monitoring started or beyond the last check — stay as "gap" so they
- * render as blank space, not as a fault region.
- *
- * The original `slots` array (used for stats / gap counting) is never mutated.
+ * Round a latency max value up to a human-friendly "nice" number with ~30%
+ * headroom.  Examples: 2→5, 6→10, 20→50, 80→150, 300→500, 1500→2000.
  */
+function niceLatencyMax(maxVal: number): number {
+  if (maxVal <= 0) return 10;
+  const headroom = maxVal * 1.3;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(headroom)));
+  const normalized = headroom / magnitude;
+  const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return nice * magnitude;
+}
+
 function resolveGapSlots(slots: Slot[]): Slot[] {
   const firstData = slots.findIndex((s) => s.status !== "gap");
-  if (firstData === -1) return slots; // no data at all
+  if (firstData === -1) return slots;
 
   let lastData = -1;
   for (let i = slots.length - 1; i >= 0; i--) {
@@ -157,18 +176,11 @@ function resolveGapSlots(slots: Slot[]): Slot[] {
 
   return slots.map((s, i) => {
     if (s.status !== "gap") return s;
-    // Interior gap → treat as downtime
     if (i > firstData && i < lastData) return { ...s, status: "unhealthy" as const };
-    // Leading / trailing gap → leave blank
     return s;
   });
 }
 
-/** Find contiguous spans of a non-healthy state for ReferenceArea shading.
- *  x1/x2 use `slot.time` (unique UTC ISO minute string) so that duplicate
- *  timeLabels in a 24-hour view (where the first and last label are identical)
- *  don't cause recharts to misposition the shaded regions.
- */
 function buildRefSpans(
   slots: Slot[],
 ): Array<{ x1: string; x2: string; type: "unhealthy" | "unknown" | "gap" }> {
@@ -188,7 +200,6 @@ function buildRefSpans(
       spanStart = null;
       spanType = null;
     } else if (isProblematic && spanType !== null && s.status !== spanType) {
-      // status type changed within a problematic run — split span
       spans.push({ x1: spanStart!, x2: slots[i - 1].time, type: spanType });
       spanStart = s.time;
       spanType = s.status as "unhealthy" | "unknown" | "gap";
@@ -199,6 +210,7 @@ function buildRefSpans(
   }
   return spans;
 }
+
 
 // ─── component ──────────────────────────────────────────────────────────────
 
@@ -225,8 +237,6 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
 
   const refSpans = useMemo(() => buildRefSpans(resolveGapSlots(slots)), [slots]);
 
-  // Map from unique `time` key → display label, used as XAxis tickFormatter so
-  // the axis shows readable labels while x1/x2 reference unique time strings.
   const labelMap = useMemo(
     () => new Map(slots.map((s) => [s.time, s.timeLabel])),
     [slots],
@@ -247,15 +257,29 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
     return { uptimePct, avgLatency, maxLatency, gaps };
   }, [slots]);
 
-  // Does this backend emit latency data? (direct mode)
   const hasLatency = useMemo(
     () => history.points.some((p) => p.latency_ms !== null),
     [history.points],
   );
 
-  // The Y-axis dataKey we'll plot
   const dataKey = hasLatency ? "latency" : "online";
 
+  // ── Latency-based coloring ──────────────────────────────────────────────────
+  const latencyDomainMax = useMemo(() => {
+    if (!hasLatency) return null;
+    const lats = slots.filter((s) => s.latency !== null).map((s) => s.latency as number);
+    if (lats.length === 0) return null;
+    return niceLatencyMax(Math.max(...lats));
+  }, [hasLatency, slots]);
+
+  // Tier is driven by max latency in the visible data
+  const latencyTier: LatencyTier = getLatencyTier(stats.maxLatency);
+  const strokeColor = hasLatency ? TIER_STROKE[latencyTier] : "#10b981";
+
+  const avgLatencyTier: LatencyTier = getLatencyTier(stats.avgLatency);
+  const maxLatencyTier: LatencyTier = getLatencyTier(stats.maxLatency);
+
+  // ── Status ──────────────────────────────────────────────────────────────────
   const currentStatus =
     history.points.length > 0
       ? history.points[history.points.length - 1].status
@@ -274,7 +298,6 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
       if (!active || !payload?.length) return null;
       const slot = payload[0].payload as Slot;
 
-      // Parse the stored ISO minute string as UTC → local, then format like Overview
       const slotDate = new Date(
         slot.time.endsWith("Z") ? slot.time : slot.time + "Z",
       );
@@ -308,12 +331,14 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
             ? "text-rose-500"
             : "text-slate-400";
 
+      const slotLatencyTier = getLatencyTier(slot.latency_ms);
+
       return (
         <div className="bg-popover border border-border rounded-lg p-3 shadow-lg text-xs space-y-1 min-w-[130px]">
           <p className="text-muted-foreground font-medium">{tooltipTitle}</p>
           <p className={cn("font-semibold", statusClass)}>{statusLabel}</p>
           {slot.latency_ms !== null && (
-            <p className="text-muted-foreground flex items-center gap-1">
+            <p className={cn("flex items-center gap-1", TIER_TEXT[slotLatencyTier])}>
               <Clock className="w-3 h-3" />
               <span className="tabular-nums font-medium">{slot.latency_ms}ms</span>
             </p>
@@ -356,8 +381,7 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
         <span className={cn("inline-flex w-2 h-2 rounded-full shrink-0", statusDotClass)} />
       </div>
 
-      {/* Stats row — desktop inline / mobile cards */}
-      {/* Mobile */}
+      {/* Stats row — mobile */}
       <div className="grid grid-cols-3 gap-2 lg:hidden">
         {stats.uptimePct !== null && (
           <div className="flex flex-col items-center py-1.5 px-1 rounded-md bg-secondary/50 border border-border/50">
@@ -371,17 +395,22 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
         {stats.avgLatency !== null && (
           <div className="flex flex-col items-center py-1.5 px-1 rounded-md bg-secondary/50 border border-border/50">
             <span className="text-[9px] text-muted-foreground">{t("avgLatency")}</span>
-            <span className="text-xs font-semibold tabular-nums">{stats.avgLatency}ms</span>
+            <span className={cn("text-xs font-semibold tabular-nums", TIER_TEXT[avgLatencyTier])}>
+              {stats.avgLatency}ms
+            </span>
           </div>
         )}
         {stats.maxLatency !== null && (
           <div className="flex flex-col items-center py-1.5 px-1 rounded-md bg-secondary/50 border border-border/50">
             <span className="text-[9px] text-muted-foreground">{t("maxLatency")}</span>
-            <span className="text-xs font-semibold tabular-nums">{stats.maxLatency}ms</span>
+            <span className={cn("text-xs font-semibold tabular-nums", TIER_TEXT[maxLatencyTier])}>
+              {stats.maxLatency}ms
+            </span>
           </div>
         )}
       </div>
-      {/* Desktop */}
+
+      {/* Stats row — desktop */}
       <div className="hidden lg:flex items-center gap-6 text-xs">
         {stats.uptimePct !== null && (
           <div className="flex items-center gap-1.5">
@@ -396,13 +425,17 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
           <div className="flex items-center gap-1.5">
             <Clock className="w-3.5 h-3.5 text-muted-foreground" />
             <span className="text-muted-foreground">{t("avgLatency")}:</span>
-            <span className="font-semibold text-emerald-500 tabular-nums">{stats.avgLatency}ms</span>
+            <span className={cn("font-semibold tabular-nums", TIER_TEXT[avgLatencyTier])}>
+              {stats.avgLatency}ms
+            </span>
           </div>
         )}
         {stats.maxLatency !== null && (
           <div className="flex items-center gap-1.5">
             <span className="text-muted-foreground">{t("maxLatency")}:</span>
-            <span className="font-semibold tabular-nums">{stats.maxLatency}ms</span>
+            <span className={cn("font-semibold tabular-nums", TIER_TEXT[maxLatencyTier])}>
+              {stats.maxLatency}ms
+            </span>
           </div>
         )}
         {stats.gaps > 0 && (
@@ -420,8 +453,8 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
           <AreaChart data={slots} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id={`colorHealth-${history.backendId}`} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%"  stopColor="#10b981" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                <stop offset="5%"  stopColor={strokeColor} stopOpacity={0.3} />
+                <stop offset="95%" stopColor={strokeColor} stopOpacity={0} />
               </linearGradient>
             </defs>
 
@@ -432,7 +465,6 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
               strokeOpacity={0.2}
             />
 
-            {/* Shade problematic spans — skip leading/trailing gaps (blank) */}
             {refSpans.filter((s) => s.type !== "gap").map((span, i) => (
               <ReferenceArea
                 key={i}
@@ -440,8 +472,8 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
                 x2={span.x2}
                 fill={
                   span.type === "unhealthy"
-                    ? "rgba(244,63,94,0.22)"   // rose
-                    : "rgba(251,191,36,0.18)"  // amber / unknown
+                    ? "rgba(244,63,94,0.22)"
+                    : "rgba(251,191,36,0.18)"
                 }
                 stroke={
                   span.type === "unhealthy"
@@ -467,14 +499,14 @@ export const BackendHealthChart = React.memo(function BackendHealthChart({
               tick={{ fontSize: 10, fill: "#888888" }}
               tickFormatter={hasLatency ? (v) => `${v}ms` : () => ""}
               width={hasLatency ? 44 : 0}
-              domain={hasLatency ? ["auto", "auto"] : [0, 1.2]}
+              domain={hasLatency ? [0, latencyDomainMax ?? "auto"] : [0, 1.2]}
             />
             <Tooltip content={<CustomTooltip />} />
 
             <Area
               type="monotone"
               dataKey={dataKey}
-              stroke="#10b981"
+              stroke={strokeColor}
               strokeWidth={2}
               fillOpacity={1}
               fill={`url(#colorHealth-${history.backendId})`}

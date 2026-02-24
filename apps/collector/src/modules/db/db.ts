@@ -1027,12 +1027,12 @@ export class StatsDatabase {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(backend_id) DO UPDATE SET
         agent_id = excluded.agent_id,
-        hostname = excluded.hostname,
-        version = excluded.version,
-        gateway_type = excluded.gateway_type,
-        gateway_url = excluded.gateway_url,
-        remote_ip = excluded.remote_ip,
-        gateway_latency_ms = excluded.gateway_latency_ms,
+        hostname = COALESCE(excluded.hostname, agent_heartbeats.hostname),
+        version = COALESCE(excluded.version, agent_heartbeats.version),
+        gateway_type = COALESCE(excluded.gateway_type, agent_heartbeats.gateway_type),
+        gateway_url = COALESCE(excluded.gateway_url, agent_heartbeats.gateway_url),
+        remote_ip = COALESCE(excluded.remote_ip, agent_heartbeats.remote_ip),
+        gateway_latency_ms = COALESCE(excluded.gateway_latency_ms, agent_heartbeats.gateway_latency_ms),
         last_seen = excluded.last_seen,
         updated_at = CURRENT_TIMESTAMP
     `);
