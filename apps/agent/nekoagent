@@ -85,7 +85,7 @@ compute_sha256() {
 }
 
 normalize_os() {
-  raw="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  raw="$(uname -s | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
   case "$raw" in
     linux)  echo "linux" ;;
     darwin) echo "darwin" ;;
@@ -97,7 +97,7 @@ normalize_os() {
 }
 
 normalize_arch() {
-  raw="$(uname -m | tr '[:upper:]' '[:lower:]')"
+  raw="$(uname -m | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
   case "$raw" in
     x86_64|amd64)       echo "amd64" ;;
     aarch64|arm64)      echo "arm64" ;;
@@ -576,9 +576,13 @@ do_download_manager() {
 
   current_path="$(command -v "$PROG" 2>/dev/null || true)"
   if [ -n "$current_path" ] && [ "$current_path" != "$manager_target" ] && [ -w "$current_path" ]; then
-    cp "$manager_target" "$current_path"
-    chmod +x "$current_path" || true
-    log "manager synced to: $current_path"
+    if [ -e "$current_path" ] && [ -e "$manager_target" ] && [ "$current_path" -ef "$manager_target" ]; then
+      log "manager path already points to installed target: $current_path"
+    else
+      cp "$manager_target" "$current_path"
+      chmod +x "$current_path" || true
+      log "manager synced to: $current_path"
+    fi
   fi
 }
 
